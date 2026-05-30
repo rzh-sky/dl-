@@ -23,9 +23,6 @@ VAL_END = "20251231"
 LOOKBACK = 20
 HORIZON = 1
 
-N_HOLD = 10
-K_TRADE = 2
-
 BATCH_SIZE = 512
 EPOCHS = 50
 LR = 1e-3
@@ -49,7 +46,7 @@ COMMISSION_SELL = 0.0013   # 卖出千分之1.3
 SCORE_THRESHOLD_STD = 0.5  # 建仓/买入评分阈值标准差倍数
 REBALANCE_THRESHOLD = 0.03 # 调仓最低评分差阈值(3%)
 POSITION_LIMIT = 0.15      # 单只股票最大仓位15%
-VOLUME_MIN = 10_000_000    # 最低日均成交量(手)
+VOLUME_MIN = 100_000       # 最低日均成交量(手)，约折合1000万元
 LIMIT_THRESHOLD = 9.5      # 涨跌停阈值(%)
 
 BASE_FEATURE_COLS = [

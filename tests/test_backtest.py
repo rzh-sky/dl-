@@ -19,7 +19,6 @@ class BacktestMetricTests(unittest.TestCase):
         backtest_result = pd.DataFrame(
             {
                 "trade_date": ["20240101", "20240102"],
-                "positions": [2, 2],
                 "daily_return": [0.10, 0.00],
                 "equity": [1.10, 1.10],
             }

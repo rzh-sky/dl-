@@ -20,7 +20,7 @@ from src.config import (
 )
 
 
-def normalize_weights(scores: list[float], n_hold: int, limit: float) -> np.ndarray:
+def normalize_weights(scores, n_hold: int, limit: float) -> np.ndarray:
     """排名加权（rank=1→n, rank=n→1），单只仓位上限约束后归一化。"""
     sorted_idx = np.argsort(scores)[::-1]  # 最高分排第0位
     ranks = np.argsort(sorted_idx) + 1      # 1 = 最好
@@ -40,7 +40,12 @@ def normalize_weights(scores: list[float], n_hold: int, limit: float) -> np.ndar
     return w
 
 
-def run_backtest(pred_path: Path) -> pd.DataFrame:
+def run_backtest(pred_path: Path):
+    """执行回测，返回 (equity_df, positions_df)。
+
+    equity_df     — 净值曲线（每日收益、权益、调仓数量、成本）
+    positions_df  — 持仓明细（每日持仓股票代码及权重、买卖记录）
+    """
     preds = pd.read_csv(pred_path, dtype={"trade_date": str, "ts_code": str})
     required = {"trade_date", "ts_code", "score", "ret_next", "pct_chg", "vol"}
     missing = required - set(preds.columns)
@@ -50,14 +55,16 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
     preds = preds.sort_values(["trade_date", "ts_code"]).reset_index(drop=True)
 
     # ── 状态变量 ──
-    equity = 1.0
-    positions: set[str] = set()               # 当前持仓股票代码
-    position_weights: dict[str, float] = {}   # 前一交易日收盘后的权重
-    prev_ret_map: dict[str, float] = {}       # 前一交易日的 ret_next
+    initial_capital = 1_000_000.0
+    equity = initial_capital
+    positions: set[str] = set()
+    position_weights: dict[str, float] = {}
+    prev_ret_map: dict[str, float] = {}
     rebalance_counter = 0
     toggle_flag = 0
-    daily_returns: list[float] = []           # 用于 20 日波动率计算
-    records: list[dict] = []
+    daily_returns: list[float] = []
+    equity_records: list[dict] = []
+    position_records: list[dict] = []
 
     # ── 逐日回测 ──
     for idx, (date, group) in enumerate(preds.groupby("trade_date")):
@@ -65,12 +72,12 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
         ret_map = dict(zip(group["ts_code"], group["ret_next"]))
         scores_map = dict(zip(group["ts_code"], group["score"]))
 
-        # ── 可交易池（用于调仓决策） ──
+        # ── 可交易池 ──
         tradable = group[group["vol"] >= VOLUME_MIN]
         tradable = tradable[tradable["pct_chg"].abs() <= LIMIT_THRESHOLD]
         tradable = tradable.sort_values("score", ascending=False).reset_index(drop=True)
 
-        # ── 当日市场统计（基于可交易池） ──
+        # ── 当日市场统计 ──
         if len(tradable) > 0:
             score_mean = float(tradable["score"].mean())
             score_std = float(tradable["score"].std(ddof=0)) if len(tradable) > 1 else 0.0
@@ -78,9 +85,9 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
         else:
             score_mean = score_std = score_threshold = 0.0
 
-        # ═══════════════════════════════════════════════════════════
-        #  第一步：组合收益（基于前一日权重 × 前一日 ret_next）
-        # ═══════════════════════════════════════════════════════════
+        # ════════════════════════════════════════════
+        #  第一步：组合收益
+        # ════════════════════════════════════════════
         if idx == 0:
             port_ret = 0.0
         else:
@@ -92,12 +99,14 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
 
         equity_after_ret = equity * (1.0 + port_ret)
 
-        # ═══════════════════════════════════════════════════════════
+        # ════════════════════════════════════════════
         #  第二步：调仓执行
-        # ═══════════════════════════════════════════════════════════
+        # ════════════════════════════════════════════
         sell_cost_frac = 0.0
         buy_cost_frac = 0.0
         trades = 0
+        sold_stocks: list[str] = []
+        bought_stocks: list[str] = []
 
         if idx == 0:
             # ── 首次建仓 ──
@@ -108,6 +117,7 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                 selected = tradable.head(TARGET_N_HOLD)["ts_code"].tolist()
             positions = set(selected)
             trades = len(selected)
+            bought_stocks = list(selected)
             buy_cost_frac = trades / TARGET_N_HOLD
             rebalance_counter = 0
 
@@ -118,7 +128,7 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
             if len(daily_returns) >= 20:
                 vol_20 = float(np.std(daily_returns[-20:], ddof=0))
             else:
-                vol_20 = 0.01  # 默认假设 1%
+                vol_20 = 0.01
 
             if vol_20 < 0.01:
                 n_raw = 1
@@ -135,7 +145,6 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                 toggle_flag = 0
 
             if n_trade > 0 and positions:
-                # 卖出候选：持仓 ∩ 可交易，评分低于均值，取最低 N 只
                 active_pos = positions & set(tradable["ts_code"])
                 pos_tradable_df = tradable[tradable["ts_code"].isin(active_pos)]
                 sell_candidates = pos_tradable_df[
@@ -144,7 +153,6 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                 to_sell = set(sell_candidates.head(n_trade)["ts_code"].tolist())
 
                 if to_sell:
-                    # 买入候选：可交易 \ 持仓，评分≥阈值，取最高 N 只
                     non_pos = tradable[~tradable["ts_code"].isin(positions)]
                     buy_candidates = non_pos[
                         non_pos["score"] >= score_threshold
@@ -155,18 +163,23 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                         highest_buy = to_buy["score"].iloc[0]
                         lowest_sell = min(scores_map.get(c, -999.0) for c in to_sell)
 
-                        # 动态调仓阈值：买入最高评分 > 卖出最低评分 * (1+3%)
                         if highest_buy > lowest_sell * (1.0 + REBALANCE_THRESHOLD):
+                            # ★ 先记录卖出权重，再移除
+                            sold_weights = {
+                                c: position_weights.get(c, 1.0 / TARGET_N_HOLD)
+                                for c in to_sell
+                            }
                             for code in to_sell:
                                 positions.discard(code)
                                 position_weights.pop(code, None)
+
                             for code in to_buy["ts_code"].tolist():
                                 positions.add(code)
+
                             trades = n_trade
-                            sell_cost_frac = sum(
-                                position_weights.get(c, 1.0 / TARGET_N_HOLD)
-                                for c in to_sell
-                            )
+                            sold_stocks = list(to_sell)
+                            bought_stocks = to_buy["ts_code"].tolist()
+                            sell_cost_frac = sum(sold_weights.values())
                             buy_cost_frac = n_trade / TARGET_N_HOLD
 
         # ── 交易成本 ──
@@ -176,9 +189,9 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
         )
         equity = equity_after_ret * (1.0 - cost_frac)
 
-        # ═══════════════════════════════════════════════════════════
-        #  第三步：重新计算持仓权重（排名加权 + 仓位上限）
-        # ═══════════════════════════════════════════════════════════
+        # ════════════════════════════════════════════
+        #  第三步：重新计算权重
+        # ════════════════════════════════════════════
         if positions:
             held = group[group["ts_code"].isin(positions)][
                 ["ts_code", "score"]
@@ -190,7 +203,6 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                 )
                 position_weights = dict(zip(held["ts_code"], w))
             else:
-                # 部分持仓股票当日无数据（停牌等）→ 保留旧权重，再归一化
                 new_w = {}
                 if not held.empty:
                     held = held.sort_values("score", ascending=False)
@@ -209,23 +221,52 @@ def run_backtest(pred_path: Path) -> pd.DataFrame:
                         k: 1.0 / len(positions) for k in positions
                     }
 
-        # ── 保存状态，准备下一日 ──
+        # ════════════════════════════════════════════
+        #  保存记录
+        # ════════════════════════════════════════════
         daily_ret_adjusted = port_ret - cost_frac
         daily_returns.append(daily_ret_adjusted)
         rebalance_counter += 1
         prev_ret_map = dict(ret_map)
 
-        records.append(
+        equity_records.append(
             {
                 "trade_date": date,
                 "n_positions": len(positions),
                 "daily_return": daily_ret_adjusted,
                 "equity": equity,
                 "trades": trades,
+                "cost_frac": cost_frac,
+                "sell_cost": sell_cost_frac * COMMISSION_SELL * equity_after_ret,
+                "buy_cost": buy_cost_frac * COMMISSION_BUY * equity_after_ret,
             }
         )
 
-    return pd.DataFrame(records)
+        # 持仓明细
+        held_list = sorted(position_weights.items(), key=lambda x: -x[1])
+        pos_str = ";".join(f"{c}:{w:.4f}" for c, w in held_list)
+        buy_str = ";".join(bought_stocks) if bought_stocks else ""
+        sell_str = ";".join(sold_stocks) if sold_stocks else ""
+
+        # 可用现金（满仓 ≈ 0）
+        cash = equity - sum(
+            position_weights.get(c, 0.0) * equity for c in positions
+        )
+
+        position_records.append(
+            {
+                "trade_date": date,
+                "n_positions": len(positions),
+                "positions": pos_str,
+                "bought": buy_str,
+                "sold": sell_str,
+                "cash_remaining": cash,
+            }
+        )
+
+    equity_df = pd.DataFrame(equity_records)
+    positions_df = pd.DataFrame(position_records)
+    return equity_df, positions_df
 
 
 def compute_backtest_metrics(
@@ -263,16 +304,17 @@ def compute_backtest_metrics(
     )
 
     equity = backtest_result["equity"].astype(float)
+    equity_norm = equity / equity.iloc[0]  # 归一化：起始→1.0
     daily_ret = backtest_result["daily_return"].astype(float)
     avg_daily = float(daily_ret.mean()) if not daily_ret.empty else float("nan")
     std_daily = (
         float(daily_ret.std(ddof=0)) if not daily_ret.empty else float("nan")
     )
     total_return = (
-        float(equity.iloc[-1] - 1.0) if not equity.empty else float("nan")
+        float(equity_norm.iloc[-1] - 1.0) if not equity.empty else float("nan")
     )
     annualized_return = (
-        float((equity.iloc[-1] ** (252.0 / len(equity))) - 1.0)
+        float((equity_norm.iloc[-1] ** (252.0 / len(equity))) - 1.0)
         if not equity.empty and len(equity) > 1
         else float("nan")
     )
@@ -310,7 +352,13 @@ def main():
         "--out",
         type=str,
         default=str(BACKTEST_DIR / "backtest.csv"),
-        help="Output csv path",
+        help="Output equity curve csv path",
+    )
+    parser.add_argument(
+        "--pos-out",
+        type=str,
+        default=None,
+        help="Output position detail csv path (default: {out_dir}/backtest_{model}_positions.csv)",
     )
     args = parser.parse_args()
 
@@ -324,15 +372,25 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    result = run_backtest(pred_path)
-    result.to_csv(out_path, index=False)
-    print(f"Saved backtest to {out_path}")
+    equity_df, positions_df = run_backtest(pred_path)
 
-    if not result.empty:
+    # 保存净值曲线
+    equity_df.to_csv(out_path, index=False)
+    print(f"Saved equity curve ({len(equity_df)} days) to {out_path}")
+
+    # 保存持仓明细
+    pos_out = Path(args.pos_out or str(out_path.with_name(out_path.stem + "_positions.csv")))
+    pos_out.parent.mkdir(parents=True, exist_ok=True)
+    positions_df.to_csv(pos_out, index=False)
+    print(f"Saved position details to {pos_out}")
+
+    if not equity_df.empty:
         preds = pd.read_csv(pred_path, dtype={"trade_date": str, "ts_code": str})
-        summary = compute_backtest_metrics(preds, result)
-        print("Backtest summary:")
+        summary = compute_backtest_metrics(preds, equity_df)
+        print("\nBacktest summary:")
         print(pd.Series(summary).to_string())
+        print(f"\nInitial capital: 1,000,000 | Final equity: {equity_df['equity'].iloc[-1]:,.2f}")
+        print(f"Total trades: {int(equity_df['trades'].sum())}")
 
 
 if __name__ == "__main__":

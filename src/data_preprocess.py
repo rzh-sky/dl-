@@ -1,9 +1,13 @@
 import argparse
+import gc
 import json
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from src.config import (
@@ -143,8 +147,6 @@ def read_daily_range(start_date: str, end_date: str, max_stocks: Optional[int] =
     return data
 
 
-import gc
-import numpy as np
 
 def add_features(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     print(">>> [低内存模式] 开始时序特征提取...")
@@ -478,29 +480,35 @@ def main():
     if missing_cols:
         raise RuntimeError(f"Missing required feature columns: {missing_cols[:10]}{'...' if len(missing_cols) > 10 else ''}")
 
-    # 构造最终 DataFrame 时一次性收集需要的列，避免从高度碎片化的源 df 做大量复制。
-    # 也把 float64 显式降为 float32 以减少内存峰值。
-    new_cols = {}
+    # 用 pyarrow columnar writer 逐列写入 parquet，完全避免碎片化 DataFrame 的 consolidate
+    out_cols = [c for c in required_cols if c in df.columns]
     for c in required_cols:
-        if c in df.columns:
-            s = df[c]
-            if s.dtype == 'float64':
-                s = s.astype('float32')
-            # reset_index 保证新 Series 紧凑且索引连续
-            new_cols[c] = s.reset_index(drop=True)
-        else:
-            # 对缺失列创建常量 NaN 列，dtype 设为 float32
-            new_cols[c] = pd.Series([np.nan] * len(df), dtype='float32')
-
-    df = pd.DataFrame(new_cols)
+        if c not in df.columns:
+            df[c] = np.nan
+            df[c] = df[c].astype('float32')
+        elif df[c].dtype == 'float64':
+            df[c] = df[c].astype('float32')
 
     save_schema_artifacts(df, PROCESSED_DIR)
     save_debug_sample(df, PROCESSED_DIR / "features_debug_sample.parquet", n_rows=1000)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, index=False)
-    print(f"Saved features to {out_path}")
+
+    # 逐列构建 pyarrow Table，避免 pandas consolidate
+    pa_arrays = []
+    pa_fields = []
+    for c in out_cols:
+        col = df[c]
+        if col.dtype == 'object':
+            pa_arrays.append(pa.array(col, type=pa.string()))
+            pa_fields.append(pa.field(c, pa.string()))
+        else:
+            pa_arrays.append(pa.array(col.to_numpy(), type=pa.float32()))
+            pa_fields.append(pa.field(c, pa.float32()))
+    table = pa.Table.from_arrays(pa_arrays, schema=pa.schema(pa_fields))
+    pq.write_table(table, out_path)
+    print(f"Saved features ({table.num_rows} rows x {table.num_columns} cols) to {out_path}")
 
 
 if __name__ == "__main__":
