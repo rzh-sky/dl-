@@ -1,7 +1,7 @@
 # 大作业代码基线（详细说明）
 
 本项目提供一个**完整可运行**的示例流程：  
-**数据预处理 → 特征构造 → LSTM 训练 → 验证集回测**。
+**数据预处理 → 特征构造 → 时序模型训练 → 验证集回测**。
 
 ---
 
@@ -11,14 +11,13 @@
 - `src/`：核心代码
   - `data_preprocess.py`：数据读取、特征构造、标签生成
   - `dataset.py`：滑窗样本生成
-  - `model.py`：LSTM 回归模型
-  - `train.py`：训练 + 验证评估（IC/ICIR）
+  - `model.py`：LSTM/GRU/TCN/Transformer 回归模型
+  - `train.py`：训练 + 验证评估（Loss）
   - `backtest.py`：简单回测策略
   - `run_all.py`：一键流程
   - `config.py`：统一参数配置
 - `outputs/`：输出目录（自动生成）
   - `processed/`：特征文件
-  - `models/`：模型文件
   - `preds/`：预测结果
   - `backtest/`：回测结果
 
@@ -50,19 +49,27 @@ pip install -r requirements.txt
 
 ---
 
-## 3. 特征工程（已扩展）
+## 3. 特征工程（低内存）
 
 ### 3.1 基础特征（BASE_FEATURE_COLS）
-包含多维度价量、技术指标、基本面、资金流等（详见 `src/config.py`）。
+当前实际计算的基础特征：
 
-### 3.2 派生特征（自动生成）
-对每个基础特征按**交易日截面**生成 3 个变体：
+- 收益类：`ret1/ret3/ret5/ret10/ret20`
+- 量价变化：`vol_chg/amount_chg/vol_chg5/amount_chg5`
+- 价差与动量：`hl_range/oc_ret/mom5`
+- 均线与波动：`ma5/ma10/ma20/std5/std10`
+- RSI：`rsi6/rsi12`
+
+> 代码会按 `src/config.py` 的 `BASE_FEATURE_COLS` 进行派生。如果某些基础列未在原始数据中出现（例如部分基本面/资金流字段），会自动补 0。
+
+### 3.2 派生特征（按交易日截面）
+对每个基础特征生成 3 个变体：
 - `_z`：z-score 标准化
 - `_rank`：截面排名（0~1）
-- `_missing`：缺失标记（0/1）
+- `_miss`：缺失标记（0/1）
 
 最终特征列为：  
-`原始特征 + 原始特征_z + 原始特征_rank + 原始特征_missing`
+`原始特征 + 原始特征_z + 原始特征_rank + 原始特征_miss`
 
 ---
 
@@ -88,8 +95,8 @@ pip install -r requirements.txt
 - 验证区间：`VAL_START ~ VAL_END`
 - 评估指标：
   - `Loss`（MSE）
-  - `IC`（按交易日截面相关系数）
-  - `ICIR`（IC 均值 / IC 标准差）
+
+> 当前实现仅输出 `Loss`，未计算 `IC/ICIR`。
 
 ---
 
@@ -123,11 +130,10 @@ python -m src.train --data outputs/processed/features.parquet --model lstm
 ```bash
 python -m src.train --data outputs/processed/features.parquet --model gru
 python -m src.train --data outputs/processed/features.parquet --model tcn
-python -m src.train --data outputs/processed/features.parquet --model transformer --heads 4
+python -m src.train --data outputs/processed/features.parquet --model transformer
 ```
 
 输出：
-- 模型：`outputs/models/best.pt`
 - 验证集预测：`outputs/preds/val_predictions.csv`
 
 ### 7.3 回测
@@ -138,6 +144,11 @@ python -m src.backtest --pred outputs/preds/val_predictions.csv
 ### 7.4 一键流程
 ```bash
 python -m src.run_all --start 20190101 --end 20251231
+```
+
+对比所有模型：
+```bash
+python -m src.run_all --compare
 ```
 
 ---
@@ -156,9 +167,8 @@ python -m src.run_all --start 20190101 --end 20251231
 ## 9. 结果输出一览
 
 - 特征文件：`outputs/processed/features.parquet`
-- 模型文件：`outputs/models/best.pt`
-- 预测结果：`outputs/preds/val_predictions.csv`
-- 回测结果：`outputs/backtest/backtest.csv`
+- 预测结果：`outputs/preds/val_predictions.csv`（或 `val_predictions_{model}.csv`）
+- 回测结果：`outputs/backtest/backtest.csv`（或 `backtest_{model}.csv`）
 
 ---
 
