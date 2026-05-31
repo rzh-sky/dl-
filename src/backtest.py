@@ -10,6 +10,7 @@ from src.config import (
     PRED_DIR,
     TARGET_N_HOLD,
     REBALANCE_INTERVAL,
+    REBALANCE_N_TRADE,
     COMMISSION_BUY,
     COMMISSION_SELL,
     SCORE_THRESHOLD_STD,
@@ -22,6 +23,8 @@ from src.config import (
 
 def normalize_weights(scores, n_hold: int, limit: float) -> np.ndarray:
     """排名加权（rank=1→n, rank=n→1），单只仓位上限约束后归一化。"""
+    if len(scores) == 0 or n_hold <= 0:
+        return np.array([], dtype=float)
     sorted_idx = np.argsort(scores)[::-1]  # 最高分排第0位
     ranks = np.argsort(sorted_idx) + 1      # 1 = 最好
     w = np.array([n_hold + 1 - r for r in ranks], dtype=float)
@@ -61,7 +64,6 @@ def run_backtest(pred_path: Path):
     position_weights: dict[str, float] = {}
     prev_ret_map: dict[str, float] = {}
     rebalance_counter = 0
-    toggle_flag = 0
     daily_returns: list[float] = []
     equity_records: list[dict] = []
     position_records: list[dict] = []
@@ -124,25 +126,7 @@ def run_backtest(pred_path: Path):
         elif rebalance_counter >= REBALANCE_INTERVAL:
             rebalance_counter = 0
 
-            # ── 自适应调仓数量 ──
-            if len(daily_returns) >= 20:
-                vol_20 = float(np.std(daily_returns[-20:], ddof=0))
-            else:
-                vol_20 = 0.01
-
-            if vol_20 < 0.01:
-                n_raw = 1
-            elif vol_20 < 0.02:
-                n_raw = 0.5
-            else:
-                n_raw = 0
-
-            if 0 < n_raw < 1:
-                toggle_flag = 1 - toggle_flag
-                n_trade = 1 if toggle_flag else 0
-            else:
-                n_trade = int(n_raw)
-                toggle_flag = 0
+            n_trade = REBALANCE_N_TRADE
 
             if n_trade > 0 and positions:
                 active_pos = positions & set(tradable["ts_code"])

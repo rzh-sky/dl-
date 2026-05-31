@@ -211,6 +211,7 @@ class TransformerRegressor(nn.Module):
         max_len: int = 512,
     ):
         super().__init__()
+        self.input_norm = nn.LayerNorm(input_dim)
         self.proj = nn.Linear(input_dim, hidden_dim)
         self.max_len = max_len
         self.pos_embedding = nn.Parameter(torch.zeros(1, max_len, hidden_dim))
@@ -233,6 +234,7 @@ class TransformerRegressor(nn.Module):
         if seq_len > self.max_len:
             raise ValueError(f"Sequence length {seq_len} exceeds max_len={self.max_len}")
 
+        x = self.input_norm(x)
         x = self.proj(x)
         x = x + self.pos_embedding[:, :seq_len, :]
         x = self.pos_drop(x)

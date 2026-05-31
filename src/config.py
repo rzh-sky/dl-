@@ -6,6 +6,8 @@ DAILY_DIR = DATA_DIR / "daily"
 STOCK_ST_DIR = DATA_DIR / "stock_st"
 METRIC_DIR = DATA_DIR / "metric"
 MONEYFLOW_DIR = DATA_DIR / "moneyflow"
+NEWS_DIR = DATA_DIR / "news"
+MARKET_DIR = DATA_DIR / "market"
 OUTPUT_DIR = ROOT / "outputs"
 PROCESSED_DIR = OUTPUT_DIR / "processed"
 MODEL_DIR = OUTPUT_DIR / "models"
@@ -39,15 +41,34 @@ TRANSFORMER_HEADS = 4
 TRANSFORMER_LAYERS = 2
 
 # Backtest strategy params
-TARGET_N_HOLD = 10
-REBALANCE_INTERVAL = 2
+TARGET_N_HOLD = 15
+REBALANCE_INTERVAL = 5
 COMMISSION_BUY = 0.0003    # 买入万分之3
 COMMISSION_SELL = 0.0013   # 卖出千分之1.3
-SCORE_THRESHOLD_STD = 0.5  # 建仓/买入评分阈值标准差倍数
+SCORE_THRESHOLD_STD = 0.0  # 建仓/买入评分阈值标准差倍数
+REBALANCE_N_TRADE = 3      # 每次调仓换几只（固定值）
 REBALANCE_THRESHOLD = 0.03 # 调仓最低评分差阈值(3%)
 POSITION_LIMIT = 0.15      # 单只股票最大仓位15%
 VOLUME_MIN = 100_000       # 最低日均成交量(手)，约折合1000万元
 LIMIT_THRESHOLD = 9.5      # 涨跌停阈值(%)
+
+NEWS_FEATURE_COLS = ["news_count", "news_polarity", "industry_news_count", "industry_news_polarity"]
+
+MARKET_FEATURE_COLS = [
+    "mkt_sh_pct_chg",   # 上证指数涨跌幅
+    "mkt_sz_pct_chg",   # 沪深300涨跌幅
+    "mkt_cy_pct_chg",   # 创业板指涨跌幅
+    "mkt_sh_pct_chg_ma5",  # 上证5日均涨幅
+    "mkt_sz_pct_chg_ma5",
+    "mkt_cy_pct_chg_ma5",
+]
+
+INDUSTRY_FEATURE_COLS = [
+    "ind_ret_avg",       # 个股所属行业当日平均收益
+    "ind_ret_avg_ma5",   # 行业5日平均收益
+]
+
+EXTRA_FEATURE_COLS = MARKET_FEATURE_COLS + INDUSTRY_FEATURE_COLS
 
 BASE_FEATURE_COLS = [
     "ret1",
@@ -111,12 +132,21 @@ BASE_FEATURE_COLS = [
     "sm_buy_ratio",
     "md_buy_ratio",
     "elg_buy_ratio",
+
 ]
 
 DERIVED_SUFFIXES = ["_z", "_rank", "_miss"]
 FEATURE_COLS = BASE_FEATURE_COLS + [
     f"{col}{suffix}" for col in BASE_FEATURE_COLS for suffix in DERIVED_SUFFIXES
 ]
+# 额外特征：新闻+行业需要衍生列，市场特征不需要（截面无差异）
+EXTRA_FEATURE_COLS = NEWS_FEATURE_COLS + INDUSTRY_FEATURE_COLS
+EXTRA_FEATURE_DERIVED = [
+    f"{col}{suffix}" for col in EXTRA_FEATURE_COLS for suffix in DERIVED_SUFFIXES
+]
+FEATURE_COLS = list(dict.fromkeys(
+    FEATURE_COLS + EXTRA_FEATURE_COLS + EXTRA_FEATURE_DERIVED + MARKET_FEATURE_COLS
+))
 
 # 全局调试开关：在调试模式下会执行额外的完整性检查（可能会扫描大数组）
 DEBUG = False

@@ -33,6 +33,7 @@ from src.config import (
     VAL_END,
     VAL_START,
 )
+from typing import Optional
 from src.config import SEED
 from src.dataset import SequenceDataset
 from src.model import build_model
@@ -71,7 +72,7 @@ def evaluate(model, loader, criterion, device):
     return total_loss / len(loader.dataset), preds, labels
 
 
-def generate_predictions(model, dataset, preds, out_path: Path, data_path: Path | None = None):
+def generate_predictions(model, dataset, preds, out_path: Path, data_path: Optional[Path] = None):
     row_indices = [offset + end_i for offset, end_i in dataset.index_map]
     out_df = pd.DataFrame(
         {

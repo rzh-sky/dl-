@@ -12,6 +12,10 @@ from tqdm import tqdm
 
 from src.config import (
     DAILY_DIR,
+    DATA_DIR,
+    NEWS_FEATURE_COLS,
+    MARKET_FEATURE_COLS,
+    INDUSTRY_FEATURE_COLS,
     BASE_FEATURE_COLS,
     FEATURE_COLS,
     OUTPUT_DIR,
@@ -19,6 +23,7 @@ from src.config import (
     STOCK_ST_DIR,
     METRIC_DIR,
     MONEYFLOW_DIR,
+    MARKET_DIR,
     DEFAULT_START,
     DEFAULT_END,
 )
@@ -473,6 +478,137 @@ def main():
 
     df = read_daily_range(args.start, args.end, max_stocks=args.max_stocks)
     df = add_features(df, horizon=args.horizon)
+
+    # ── 集成新闻特征 ──
+    news_path = PROCESSED_DIR / "news_features.parquet"
+    print(f">>> 新闻特征路径: {news_path}, 存在: {news_path.exists()}")
+    if news_path.exists():
+        print(">>> 正在集成新闻特征...")
+        news_df = pd.read_parquet(news_path)
+        news_df["trade_date"] = news_df["trade_date"].astype(str)
+        # 只取本时间范围内的新闻特征
+        news_df = news_df[
+            (news_df["trade_date"] >= args.start)
+            & (news_df["trade_date"] <= args.end)
+        ]
+        # 去掉 add_features 创建的占位 NaN 列（避免 merge 产生 _x/_y 后缀）
+        for col in NEWS_FEATURE_COLS:
+            drop_suff = [col, f"{col}_z", f"{col}_rank", f"{col}_miss"]
+            for c in drop_suff:
+                if c in df.columns:
+                    df.drop(columns=[c], inplace=True)
+        pre_len = len(df)
+        df = df.merge(news_df, on=["trade_date", "ts_code"], how="left")
+        for col in NEWS_FEATURE_COLS:
+            if col in df.columns:
+                df[col] = df[col].fillna(0).astype("float32")
+        print(f"    合并后 {len(df)} 行 (之前 {pre_len})")
+        # 对新闻特征单独做截面标准化（因已过 add_features 的标准化循环）
+        date_gb = df.groupby("trade_date")
+        for col in NEWS_FEATURE_COLS:
+            if col not in df.columns:
+                continue
+            df[f"{col}_miss"] = (df[col] == 0).astype("int8")
+            lower = date_gb[col].transform(lambda x: x.quantile(0.01))
+            upper = date_gb[col].transform(lambda x: x.quantile(0.99))
+            df[col] = df[col].clip(lower=lower.fillna(-np.inf), upper=upper.fillna(np.inf))
+            del lower, upper
+            col_mean = date_gb[col].transform("mean")
+            col_std = date_gb[col].transform("std").replace(0, 1e-9)
+            df[f"{col}_z"] = ((df[col] - col_mean) / col_std).astype("float32")
+            del col_mean, col_std
+            df[f"{col}_rank"] = date_gb[col].rank(pct=True).astype("float32")
+        del date_gb
+        print("    >> 新闻特征标准化完成")
+    else:
+        print(f">>> 未找到新闻特征文件 {news_path}，跳过")
+        for col in NEWS_FEATURE_COLS:
+            df[col] = np.float32(0.0)
+
+    # ── 集成市场基准特征 ──
+    print(">>> 正在集成市场基准特征...")
+    # 去掉 add_features 创建的占位列
+    for col in MARKET_FEATURE_COLS + INDUSTRY_FEATURE_COLS:
+        for suffix in ["", "_z", "_rank", "_miss"]:
+            c = f"{col}{suffix}"
+            if c in df.columns:
+                df.drop(columns=[c], inplace=True)
+    # 行业映射
+    basic = pd.read_csv(DATA_DIR / "basic.csv", dtype={"ts_code": str})
+    industry_of_code = dict(zip(basic["ts_code"], basic["industry"].fillna("未知")))
+
+    # 用 dict map 避免 merge 触发碎片化拷贝
+    for fname, tag in [("000001.SH.csv", "sh"), ("000300.SH.csv", "sz"), ("399006.SZ.csv", "cy")]:
+        mkt_path = MARKET_DIR / fname
+        if not mkt_path.exists():
+            continue
+        mkt_df = pd.read_csv(mkt_path, dtype={"trade_date": str})
+        mkt_df = mkt_df[["trade_date", "pct_chg"]].sort_values("trade_date").reset_index(drop=True)
+        val_map = dict(zip(mkt_df["trade_date"], mkt_df["pct_chg"]))
+        mkt_df["ma5"] = mkt_df["pct_chg"].rolling(5).mean()
+        ma5_map = dict(zip(mkt_df["trade_date"], mkt_df["ma5"]))
+        df[f"mkt_{tag}_pct_chg"] = df["trade_date"].map(val_map).fillna(0).astype("float32")
+        df[f"mkt_{tag}_pct_chg_ma5"] = df["trade_date"].map(ma5_map).fillna(0).astype("float32")
+    del mkt_df, val_map, ma5_map
+    gc.collect()
+
+    # ── 集成行业相对特征 ──
+    print(">>> 正在计算行业相对特征...")
+    df["industry"] = df["ts_code"].map(industry_of_code).fillna("未知")
+    if "ret1" in df.columns:
+        # 聚合并 merge 回原表（merge 对小表很高效）
+        ind_summary = df.groupby(["trade_date", "industry"], sort=False)["ret1"].mean().reset_index()
+        ind_summary.columns = ["trade_date", "industry", "ind_ret_avg"]
+        ind_summary["ind_ret_avg"] = ind_summary["ind_ret_avg"].astype("float32")
+        ind_summary["ind_ret_avg_ma5"] = (
+            ind_summary.groupby("industry")["ind_ret_avg"]
+            .transform(lambda x: x.rolling(5, min_periods=1).mean())
+        ).astype("float32")
+        # 只保留必要列做 merge，避免复制整个大表
+        ind_summary = ind_summary[["trade_date", "industry", "ind_ret_avg", "ind_ret_avg_ma5"]]
+        n_before = len(df)
+        df = df.merge(ind_summary, on=["trade_date", "industry"], how="left")
+        df["ind_ret_avg"] = df["ind_ret_avg"].fillna(0).astype("float32")
+        df["ind_ret_avg_ma5"] = df["ind_ret_avg_ma5"].fillna(0).astype("float32")
+        del ind_summary
+    else:
+        df["ind_ret_avg"] = np.float32(0.0)
+        df["ind_ret_avg_ma5"] = np.float32(0.0)
+    gc.collect()
+
+    # 行业特征截面标准化（市场特征各股票相同，跳过标准化）
+    for col in INDUSTRY_FEATURE_COLS:
+        if col not in df.columns:
+            continue
+        arr = df[col].to_numpy(dtype=np.float32, copy=True)
+        df[f"{col}_miss"] = np.isnan(arr).astype("int8")
+        arr = np.nan_to_num(arr, nan=0.0)
+        uniq_dates = pd.unique(df["trade_date"])
+        date_idx = df["trade_date"].values
+        rank_arr = np.empty(len(arr), dtype=np.float32)
+        z_arr = np.empty(len(arr), dtype=np.float32)
+        for date in uniq_dates:
+            mask = date_idx == date
+            n = mask.sum()
+            if n < 5:
+                z_arr[mask] = 0.0
+                rank_arr[mask] = 0.5
+                continue
+            vals = arr[mask]
+            lo, hi = np.percentile(vals, [1, 99])
+            vals_c = np.clip(vals, lo, hi)
+            mu, sigma = float(vals_c.mean()), float(vals_c.std())
+            z_arr[mask] = (vals_c - mu) / max(sigma, 1e-9)
+            rank_arr[mask] = (np.argsort(np.argsort(vals_c)) + 1).astype(np.float32) / n
+        df[f"{col}_z"] = z_arr
+        df[f"{col}_rank"] = rank_arr
+        del rank_arr, z_arr, arr
+        gc.collect()
+    print("    >> 市场/行业特征标准化完成")
+    # 去掉临时列
+    for c in ["industry"]:
+        if c in df.columns:
+            df.drop(columns=[c], inplace=True)
 
     BACKTEST_AUX = ["ret_next", "pct_chg", "vol", "close"]
     required_cols = ["trade_date", "ts_code", "label"] + BACKTEST_AUX + [col for col in FEATURE_COLS if col in df.columns]
