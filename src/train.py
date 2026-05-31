@@ -71,7 +71,7 @@ def evaluate(model, loader, criterion, device):
     return total_loss / len(loader.dataset), preds, labels
 
 
-def generate_predictions(model, dataset, preds, out_path: Path):
+def generate_predictions(model, dataset, preds, out_path: Path, data_path: Path | None = None):
     row_indices = [offset + end_i for offset, end_i in dataset.index_map]
     out_df = pd.DataFrame(
         {
@@ -81,15 +81,29 @@ def generate_predictions(model, dataset, preds, out_path: Path):
             "label": dataset.labels[row_indices],
         }
     )
-    # 加入回测辅助列（如果 dataset 有这些数据）
-    if dataset.ret_next is not None:
-        out_df["ret_next"] = dataset.ret_next[row_indices]
-    if dataset.pct_chg is not None:
-        out_df["pct_chg"] = dataset.pct_chg[row_indices]
-    if dataset.vol is not None:
-        out_df["vol"] = dataset.vol[row_indices]
-    if dataset.close is not None:
-        out_df["close"] = dataset.close[row_indices]
+    # 加入回测辅助列（优先从 dataset 取，没有则从 parquet 补齐）
+    aux_cols = ["ret_next", "pct_chg", "vol", "close"]
+    missing = []
+    for col in aux_cols:
+        arr = getattr(dataset, col, None)
+        if arr is not None:
+            out_df[col] = arr[row_indices]
+        else:
+            missing.append(col)
+
+    if missing and data_path is not None and data_path.exists():
+        print(f"  >> Fallback: loading {missing} from {data_path}")
+        # 推断预测集的时间范围
+        dates = out_df["trade_date"].unique()
+        date_min, date_max = str(dates.min()), str(dates.max())
+        aux_df = pd.read_parquet(
+            data_path,
+            columns=["trade_date", "ts_code"] + missing,
+            filters=[("trade_date", ">=", date_min), ("trade_date", "<=", date_max)],
+        )
+        out_df = out_df.merge(aux_df, on=["trade_date", "ts_code"], how="left")
+    elif missing:
+        print(f"  >> Warning: missing columns {missing}, no fallback data provided")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(out_path, index=False)
@@ -225,7 +239,7 @@ def main():
     # ── 输出预测 ──
     if best_preds is not None:
         pred_out_path = Path(args.pred_out)
-        generate_predictions(model, val_ds, best_preds, pred_out_path)
+        generate_predictions(model, val_ds, best_preds, pred_out_path, data_path)
 
     # 输出最终 train / val loss
     print(f"Final — Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
